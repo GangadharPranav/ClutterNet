@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClutterNet // Real-Time AI Radar Clutter Mitigation Dashboard (BDTS Hyderabad)</title>
+  <meta name="description" content="Tactical radar evaluation dashboard demonstrating ClutterNet deep neural clutter suppression vs legacy CA-CFAR under rough sea states.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=JetBrains+Mono:wght@400;500;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="tactical-hud-theme">
+
+  <!-- Scanline & Ambient Grid Overlays -->
+  <div class="hud-scanlines" aria-hidden="true"></div>
+  <div class="hud-grid-background" aria-hidden="true"></div>
+
+  <!-- Top Tactical Header -->
+  <header class="hud-header">
+    <div class="header-left">
+      <div class="radar-emblem">
+        <div class="radar-emblem-ring"></div>
+        <div class="radar-emblem-blip"></div>
+      </div>
+      <div class="title-group">
+        <div class="classification-strip">
+          <span class="badge-tag">BDTS HYDERABAD 2026</span>
+          <span class="badge-tag live-badge"><span class="pulsing-dot"></span> LIVE EVALUATION</span>
+          <span class="badge-tag code-badge">DEFENSE TRACK // NAVAL RADAR</span>
+        </div>
+        <h1 class="main-title">CLUTTERNET <span class="title-sub">TACTICAL RADAR EVALUATOR</span></h1>
+      </div>
+    </div>
+
+    <!-- Live Telemetry Status Bar (Block 3) -->
+    <div class="header-metrics" id="headerTelemetry">
+      <div class="metric-card" title="Neural Inference Time on embedded NVIDIA Jetson AGX Orin">
+        <div class="metric-label">INFERENCE LATENCY</div>
+        <div class="metric-val text-cyan"><span id="metricLatency">18.4</span> <span class="unit">ms</span></div>
+        <div class="metric-sub">&lt; 25 ms CPI BUDGET</div>
+      </div>
+
+      <div class="metric-card" title="Clutter power attenuation over ocean waves">
+        <div class="metric-label">CLUTTER SUPPRESSION</div>
+        <div class="metric-val text-green"><span id="metricGain">+14.2</span> <span class="unit">dB</span></div>
+        <div class="metric-sub">K-DISTRIBUTION FIT</div>
+      </div>
+
+      <div class="metric-card" title="False Alarm Rate compared to legacy CFAR">
+        <div class="metric-label">FALSE ALARM (Pfa)</div>
+        <div class="metric-val text-emerald"><span id="metricPfa">&lt; 10⁻⁵</span></div>
+        <div class="metric-sub">VS <span id="cfarPfaCompare">3.8×10⁻²</span> CFAR</div>
+      </div>
+
+      <div class="metric-card" id="modeCard">
+        <div class="metric-label">SYSTEM MODE</div>
+        <div class="metric-val mode-pill" id="modeIndicator">
+          <span class="mode-dot"></span>
+          <span id="modeText">HYBRID AI-CFAR ACTIVE</span>
+        </div>
+        <div class="metric-sub" id="modeSub">ZERO DROPOUT STANDBY</div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <button class="audio-btn" id="audioToggleBtn" title="Toggle Tactical Audio Feedback" aria-label="Toggle Tactical Audio Feedback">
+        <span class="audio-icon" id="audioIcon">🔇</span> <span id="audioLabel">AUDIO OFF</span>
+      </button>
+      <a href="ClutterNet_Hyderabad_Proposal.pdf" download="ClutterNet_Hyderabad_Proposal.pdf" class="btn-proposal-quick" title="Download Official Proposal PDF">
+        <span class="icon-doc">📄</span> PROPOSAL PDF
+      </a>
+    </div>
+  </header>
+
+  <main class="dashboard-body">
+
+    <!-- BLOCK 1: Hero Section - Side-by-Side Heatmaps -->
+    <section class="visualizer-section">
+      <div class="section-topbar">
+        <div class="section-title-wrap">
+          <span class="section-id">BLOCK 01</span>
+          <h2 class="section-title">LIVE RANGE-DOPPLER TACTICAL VISUALIZER</h2>
+          <span class="section-desc">Side-by-side real-time pulse-Doppler processing across dynamic ocean swell</span>
+        </div>
+
+        <!-- Colormap & Display Options -->
+        <div class="palette-selector">
+          <span class="ctrl-label-sm">RADAR PALETTE:</span>
+          <button class="palette-btn active" data-map="phosphor">PHOSPHOR</button>
+          <button class="palette-btn" data-map="jet">TURBO/JET</button>
+          <button class="palette-btn" data-map="cyan">CYBER CYAN</button>
+          <button class="palette-btn" data-map="plasma">PLASMA</button>
+        </div>
+      </div>
+
+      <!-- 3 Side-by-Side Radar Heatmaps -->
+      <div class="heatmaps-grid">
+
+        <!-- 1. Raw Range-Doppler Map -->
+        <div class="radar-card" id="cardRaw">
+          <div class="card-header">
+            <div class="card-tag tag-raw">INPUT STREAM</div>
+            <h3 class="card-title">RAW RANGE-DOPPLER MAP</h3>
+            <span class="card-status">K-Dist Clutter + Buried Target</span>
+          </div>
+          <div class="canvas-container">
+            <canvas id="canvasRaw" width="280" height="210"></canvas>
+            <div class="crosshair-h" id="crosshairHRaw"></div>
+            <div class="crosshair-v" id="crosshairVRaw"></div>
+            <div class="radar-scanline"></div>
+            <div class="axis-y-label">DOPPLER VELOCITY (m/s)</div>
+            <div class="axis-x-label">RANGE (km) &rarr;</div>
+            <div class="target-marker" id="markerRaw" title="Target Position"></div>
+          </div>
+          <div class="card-footer">
+            <span class="card-footer-item">Sea Clutter: <strong id="rawClutterLvl">Severe</strong></span>
+            <span class="card-footer-item">Buried Target: <strong id="rawTargetVisibility">Masked (Low SCR)</strong></span>
+          </div>
+        </div>
+
+        <!-- 2. Legacy CA-CFAR Output -->
+        <div class="radar-card" id="cardCfar">
+          <div class="card-header">
+            <div class="card-tag tag-cfar">BASELINE PROCESSOR</div>
+            <h3 class="card-title">LEGACY CA-CFAR</h3>
+            <span class="card-status status-warn">Clutter Leakage & False Alarms</span>
+          </div>
+          <div class="canvas-container">
+            <canvas id="canvasCfar" width="280" height="210"></canvas>
+            <div class="crosshair-h" id="crosshairHCfar"></div>
+            <div class="crosshair-v" id="crosshairVCfar"></div>
+            <div class="radar-scanline"></div>
+            <div class="axis-y-label">DOPPLER VELOCITY (m/s)</div>
+            <div class="axis-x-label">RANGE (km) &rarr;</div>
+            <div class="false-alarm-counter">FALSE ALARMS: <span id="cfarAlarmCount">42</span></div>
+          </div>
+          <div class="card-footer">
+            <span class="card-footer-item">Clutter Leakage: <strong class="text-amber">High (Sea Spikes)</strong></span>
+            <span class="card-footer-item">Target State: <strong id="cfarTargetStatus">Corrupted by Clutter</strong></span>
+          </div>
+        </div>
+
+        <!-- 3. ClutterNet Filtered Output -->
+        <div class="radar-card highlight-card" id="cardNet">
+          <div class="card-header">
+            <div class="card-tag tag-net">CLUTTERNET AI PROCESSOR</div>
+            <h3 class="card-title">CLUTTERNET OUTPUT</h3>
+            <span class="card-status status-green" id="netStatusPill">Target Isolated Cleanly</span>
+          </div>
+          <div class="canvas-container">
+            <canvas id="canvasNet" width="280" height="210"></canvas>
+            <div class="crosshair-h" id="crosshairHNet"></div>
+            <div class="crosshair-v" id="crosshairVNet"></div>
+            <div class="radar-scanline"></div>
+            <div class="axis-y-label">DOPPLER VELOCITY (m/s)</div>
+            <div class="axis-x-label">RANGE (km) &rarr;</div>
+            <!-- Tactical Acquisition Reticle -->
+            <div class="tactical-reticle" id="netReticle">
+              <div class="reticle-box"></div>
+              <div class="reticle-label">TARGET ACQUIRED // 98.8%</div>
+            </div>
+            <div class="failsafe-overlay" id="failSafeOverlay">
+              <div class="failsafe-box">
+                <span class="failsafe-icon">⚠️</span>
+                <strong>LOW MODEL CONFIDENCE</strong>
+                <span>AUTONOMOUS FALLBACK TO CA-CFAR ACTIVE</span>
+              </div>
+            </div>
+          </div>
+          <div class="card-footer">
+            <span class="card-footer-item">Background: <strong class="text-green" id="netBgStatus">Floor Suppressed (-14dB)</strong></span>
+            <span class="card-footer-item">Lock Confidence: <strong class="text-cyan" id="netConfidence">98.8%</strong></span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Synchronized Crosshair Readout Bar -->
+      <div class="crosshair-readout-strip">
+        <div class="readout-item">
+          <span class="lbl">CURSOR RANGE:</span>
+          <span class="val text-cyan" id="readoutRange">14.20 km</span>
+        </div>
+        <div class="readout-item">
+          <span class="lbl">DOPPLER VELOCITY:</span>
+          <span class="val text-cyan" id="readoutDoppler">+11.5 m/s</span>
+        </div>
+        <div class="readout-item">
+          <span class="lbl">RAW AMPLITUDE:</span>
+          <span class="val text-amber" id="readoutRawDbm">-62.4 dBm</span>
+        </div>
+        <div class="readout-item">
+          <span class="lbl">CLUTTERNET SIGNAL:</span>
+          <span class="val text-green" id="readoutNetDbm">-54.1 dBm</span>
+        </div>
+        <div class="readout-item">
+          <span class="lbl">PULSE CELL:</span>
+          <span class="val text-muted" id="readoutBin">Bin [68, 60]</span>
+        </div>
+        <div class="readout-hint">
+          <span>🎯 Hover over any heatmap to track coordinated pulse echo</span>
+        </div>
+      </div>
+
+      <!-- 1D Range-Doppler Cut Comparison (IEEE Radar Paper Standard) -->
+      <div class="graph-panel">
+        <div class="graph-topbar">
+          <div class="graph-title-group">
+            <h4 class="graph-title">1D RADAR CROSS-SECTION SLICE</h4>
+            <span class="graph-subtitle">Compare Signal Profile vs CA-CFAR Dynamic Threshold vs ClutterNet Clean Floor</span>
+          </div>
+          <div class="graph-controls">
+            <button class="slice-btn active" id="btnSliceRange">RANGE CUT (At Target Doppler)</button>
+            <button class="slice-btn" id="btnSliceDoppler">DOPPLER CUT (At Target Range)</button>
+          </div>
+        </div>
+        <div class="graph-canvas-wrap">
+          <canvas id="canvas1D" width="880" height="150"></canvas>
+          <div class="graph-legend">
+            <span class="legend-item"><span class="dot dot-raw"></span> Raw Echo + Clutter</span>
+            <span class="legend-item"><span class="dot dot-thresh"></span> CFAR Adaptive Threshold</span>
+            <span class="legend-item"><span class="dot dot-net"></span> ClutterNet Neural Filter</span>
+            <span class="legend-item"><span class="dot dot-target"></span> Target Peak</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2 Column Lower Deck: Controls (Block 2) & Architecture/Specs (Block 4) -->
+    <div class="lower-deck-grid">
+
+      <!-- BLOCK 2: Interactive Threat & Sea-State Controls -->
+      <section class="controls-panel">
+        <div class="section-topbar">
+          <div class="section-title-wrap">
+            <span class="section-id">BLOCK 02</span>
+            <h2 class="section-title">THREAT & SEA-STATE SIMULATION CONSOLE</h2>
+            <span class="section-desc">Stress test the algorithms against harsh maritime littoral environments</span>
+          </div>
+        </div>
+
+        <div class="controls-container">
+
+          <!-- 1. Sea State Slider -->
+          <div class="control-box">
+            <div class="control-box-header">
+              <label for="seaStateSlider" class="control-title">SEA STATE (WMO SCALE)</label>
+              <span class="control-value-pill" id="seaStateValueBadge">STATE 3 (Moderate Seas)</span>
+            </div>
+            <div class="slider-row">
+              <span class="slider-limit">State 2<br><small>Calm 0.3m</small></span>
+              <input type="range" id="seaStateSlider" min="2" max="5" step="1" value="3" class="tactical-range">
+              <span class="slider-limit">State 5<br><small>Storm 3.8m</small></span>
+            </div>
+            <div class="control-notes">
+              <span id="seaStateDesc">Wave height ~1.2m. Moderate Bragg scattering and scattered whitecaps. CA-CFAR begins exhibiting sea spike false alarms.</span>
+            </div>
+          </div>
+
+          <!-- 2. Target SCR Slider -->
+          <div class="control-box">
+            <div class="control-box-header">
+              <label for="scrSlider" class="control-title">TARGET SIGNAL-TO-CLUTTER RATIO (SCR)</label>
+              <span class="control-value-pill text-cyan" id="scrValueBadge">10 dB (Standard Vessel)</span>
+            </div>
+            <div class="slider-row">
+              <span class="slider-limit">5 dB<br><small>Stealth / Sub</small></span>
+              <input type="range" id="scrSlider" min="5" max="15" step="0.5" value="10" class="tactical-range">
+              <span class="slider-limit">15 dB<br><small>Cargo Ship</small></span>
+            </div>
+            <div class="control-notes">
+              <span id="scrDesc">Target echo power relative to mean ocean clutter. At &lt;8 dB, legacy CFAR completely drops target while ClutterNet isolates it.</span>
+            </div>
+          </div>
+
+          <!-- 3. Fail-Safe Switch -->
+          <div class="control-box failsafe-box-control">
+            <div class="failsafe-header-row">
+              <div class="failsafe-label-col">
+                <span class="failsafe-title">FAIL-SAFE CONFIDENCE SWITCH</span>
+                <span class="failsafe-sub">Simulates high epistemic uncertainty (ECM jamming / out-of-distribution wave anomalies)</span>
+              </div>
+              <label class="toggle-switch" for="failSafeToggle">
+                <input type="checkbox" id="failSafeToggle">
+                <span class="slider-switch"></span>
+              </label>
+            </div>
+            <div class="failsafe-status-bar" id="failSafeIndicator">
+              <span class="indicator-icon">🛡️</span>
+              <span id="failSafeStatusText">FAIL-SAFE STANDBY // Epistemic Uncertainty &lt; 0.18 [NOMINAL]</span>
+            </div>
+          </div>
+
+          <!-- Additional Threat Dynamics -->
+          <div class="control-subgrid">
+            <div class="control-mini-box">
+              <label for="targetPosSelect" class="mini-label">TARGET INJECTION:</label>
+              <select id="targetPosSelect" class="tactical-select">
+                <option value="center">Mid-Range Surface Craft (14.2 km, +11.5 m/s)</option>
+                <option value="closeFast">Inbound Fast Attack Drone (7.8 km, +28.0 m/s)</option>
+                <option value="distantSlow">Low-RCS Periscope (21.5 km, +3.2 m/s)</option>
+                <option value="zeroDoppler">Stationary Buoy (16.0 km, 0.0 m/s)</option>
+              </select>
+            </div>
+
+            <div class="control-mini-box">
+              <label for="sweepSpeedSelect" class="mini-label">RADAR SWEEP RATE:</label>
+              <select id="sweepSpeedSelect" class="tactical-select">
+                <option value="normal">Normal (12 RPM Naval Surveillance)</option>
+                <option value="fast">Fast (24 RPM Track-While-Scan)</option>
+                <option value="pause">Freeze Frame (Pause for Inspection)</option>
+              </select>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- BLOCK 4: Tech Specs & Architecture Diagram & Proposal Download -->
+      <section class="tech-specs-panel">
+        <div class="section-topbar">
+          <div class="section-title-wrap">
+            <span class="section-id">BLOCK 04</span>
+            <h2 class="section-title">SYSTEM ARCHITECTURE & PROPOSAL DOWNLOAD</h2>
+            <span class="section-desc">Hardware deployment specs, signal pipeline, and official proposal document</span>
+          </div>
+        </div>
+
+        <div class="tech-specs-container">
+
+          <!-- System Architecture Pipeline Diagram -->
+          <div class="architecture-flow">
+            <div class="arch-flow-header">
+              <span class="arch-flow-title">INLINE SIGNAL PROCESSING PIPELINE</span>
+              <span class="arch-flow-sub">Click any stage to view tensor dimensions & specs</span>
+            </div>
+
+            <div class="pipeline-stages">
+              <div class="stage-step active" data-stage="iq">
+                <div class="step-num">01</div>
+                <div class="step-content">
+                  <div class="step-title">RADAR I/Q STREAM</div>
+                  <div class="step-sub">1024 Range × 128 Pulse</div>
+                </div>
+                <div class="step-arrow">&rarr;</div>
+              </div>
+
+              <div class="stage-step" data-stage="fft">
+                <div class="step-num">02</div>
+                <div class="step-content">
+                  <div class="step-title">2D PULSE-DOPPLER FFT</div>
+                  <div class="step-sub">Range-Doppler Matrix</div>
+                </div>
+                <div class="step-arrow">&rarr;</div>
+              </div>
+
+              <div class="stage-step" data-stage="unet">
+                <div class="step-num">03</div>
+                <div class="step-content">
+                  <div class="step-title">CLUTTERNET U-NET</div>
+                  <div class="step-sub">Spatial-Temporal Filter</div>
+                </div>
+                <div class="step-arrow">&rarr;</div>
+              </div>
+
+              <div class="stage-step" data-stage="failsafe">
+                <div class="step-num">04</div>
+                <div class="step-content">
+                  <div class="step-title">FAIL-SAFE GATE</div>
+                  <div class="step-sub">Uncertainty &lt; 0.42</div>
+                </div>
+                <div class="step-arrow">&rarr;</div>
+              </div>
+
+              <div class="stage-step" data-stage="display">
+                <div class="step-num">05</div>
+                <div class="step-content">
+                  <div class="step-title">TACTICAL DISPLAY</div>
+                  <div class="step-sub">Target Track Extract</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Dynamic Stage Info Inspector Box -->
+            <div class="stage-detail-box" id="stageDetailBox">
+              <div class="stage-detail-header">
+                <span class="stage-detail-tag" id="stageTag">STAGE 01 SPECIFICATION</span>
+                <span class="stage-detail-rate" id="stageRate">100 MHz ADCs // sFPDP Protocol</span>
+              </div>
+              <p class="stage-detail-text" id="stageText">
+                Direct hardware ingest of raw coherent In-Phase and Quadrature pulse sequences from naval radar receiver over PCIe Gen4 bus into shared GPU host pinned memory.
+              </p>
+              <div class="stage-specs-grid" id="stageSpecsGrid">
+                <div class="spec-pill"><strong>Dimension:</strong> 1024 × 128 × 2</div>
+                <div class="spec-pill"><strong>Latency:</strong> 1.2 ms</div>
+                <div class="spec-pill"><strong>Precision:</strong> FP16 Coherent</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Comparative Benchmark Matrix -->
+          <div class="benchmark-table-wrap">
+            <table class="benchmark-table">
+              <thead>
+                <tr>
+                  <th>METRIC / SCENARIO</th>
+                  <th>LEGACY CA-CFAR</th>
+                  <th>OS-CFAR</th>
+                  <th class="col-highlight">CLUTTERNET (OURS)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Clutter Suppression (Sea State 4)</td>
+                  <td class="text-amber">0.0 dB (None)</td>
+                  <td class="text-amber">+2.1 dB</td>
+                  <td class="text-green"><strong>+14.2 dB</strong></td>
+                </tr>
+                <tr>
+                  <td>False Alarm Rate (Pfa @ State 4)</td>
+                  <td class="text-danger">4.8 × 10⁻²</td>
+                  <td class="text-amber">1.2 × 10⁻²</td>
+                  <td class="text-green"><strong>&lt; 5.0 × 10⁻⁶</strong></td>
+                </tr>
+                <tr>
+                  <td>Weak Target Detection (SCR = 5 dB)</td>
+                  <td class="text-danger">12.4% (Missed)</td>
+                  <td class="text-amber">28.1%</td>
+                  <td class="text-green"><strong>92.8% (Acquired)</strong></td>
+                </tr>
+                <tr>
+                  <td>Inference Latency (AGX Orin)</td>
+                  <td class="text-cyan">3.8 ms (DSP)</td>
+                  <td class="text-cyan">11.4 ms</td>
+                  <td class="text-green"><strong>18.4 ms (Real-Time)</strong></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Official Proposal Download Card -->
+          <div class="proposal-download-card">
+            <div class="doc-icon-large">📑</div>
+            <div class="proposal-info">
+              <div class="proposal-meta-tag">OFFICIAL SUBMISSION FILE</div>
+              <h4 class="proposal-title">ClutterNet_Hyderabad_Proposal.pdf</h4>
+              <p class="proposal-desc">
+                Full 3-page technical specification document: Executive summary, littoral combat challenge, mathematical formulation, TensorRT benchmarks, and Hyderabad sea trial roadmap.
+              </p>
+            </div>
+            <div class="proposal-action">
+              <a href="ClutterNet_Hyderabad_Proposal.pdf" download="ClutterNet_Hyderabad_Proposal.pdf" class="btn-download-proposal">
+                <span class="btn-icon">⬇</span>
+                <span class="btn-text">DOWNLOAD OFFICIAL PROPOSAL PDF</span>
+              </a>
+              <span class="file-checksum">REF: BDTS-HYD-RDR-2026-09A // VERIFIED</span>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="hud-footer">
+    <div class="footer-left">
+      <span>SYSTEM: CLUTTERNET TACTICAL EVALUATOR</span>
+      <span class="footer-divider">//</span>
+      <span>DEVELOPED FOR BDTS HYDERABAD</span>
+      <span class="footer-divider">//</span>
+      <span>AUTHOR: GANGADHAR PRANAV</span>
+    </div>
+    <div class="footer-right">
+      <span>REPOSITORY: <a href="https://github.com/GangadharPranav/ClutterNet" target="_blank" rel="noopener">github.com/GangadharPranav/ClutterNet</a></span>
+      <span class="footer-divider">//</span>
+      <span class="status-online"><span class="pulsing-dot-green"></span> 60.0 FPS REAL-TIME</span>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

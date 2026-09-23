@@ -1,6 +1,15 @@
 /**
- * ClutterNet Tactical Radar Evaluator - Real-Time Dashboard Engine
+ * ClutterNet Tactical Radar Evaluator - Fully Functional Real-Time Engine
  * Pure Vanilla JavaScript: Zero-dependency, 60+ FPS, Hardware-accelerated Canvas.
+ * Features:
+ * - O(1) Integral Image 2D CA-CFAR Processor
+ * - Interactive Click/Drag target positioning across all heatmaps
+ * - Dynamic Compound K-Distribution sea clutter + Bragg scattering + sea spikes
+ * - 4 Colormaps (Phosphor Green, Turbo Jet, Cyber Cyan, Plasma)
+ * - Coordinated Crosshair Telemetry
+ * - 1D Range/Doppler Cross-Section Cut Graph
+ * - Fail-Safe Epistemic Uncertainty Fallback Simulation
+ * - Real-time HUD telemetry & Web Audio tactical feedback
  */
 
 // --- 1. COLORMAP LOOKUP TABLES (256 RGBA Entries) ---
@@ -75,7 +84,7 @@ const COLORMAPS = {
 
 // --- 2. RADAR SIMULATION & SIGNAL PROCESSING ENGINE ---
 class RadarEngine {
-  constructor(w = 140, h = 105) {
+  constructor(w = 160, h = 120) {
     this.w = w;
     this.h = h;
     this.size = w * h;
@@ -85,7 +94,7 @@ class RadarEngine {
     this.minDoppler = -35.0;
     this.maxDoppler = 35.0;
 
-    // Controls
+    // Simulation Controls
     this.seaState = 3;
     this.targetSCR = 10;
     this.failSafeMode = false;
@@ -95,12 +104,15 @@ class RadarEngine {
     this.targetRangeBin = Math.floor(w * 0.55); // ~14.6 km
     this.targetDopplerBin = Math.floor(h * 0.65); // ~+11.5 m/s
 
-    // Buffers
+    // Float32 Processing Buffers
     this.rawMap = new Float32Array(this.size);
     this.cfarMap = new Float32Array(this.size);
     this.clutterNetMap = new Float32Array(this.size);
     this.thresholdMap = new Float32Array(this.size);
     this.detections = new Uint8Array(this.size);
+
+    // Summed Area Table (Integral Image) for O(1) CFAR
+    this.sat = new Float64Array((w + 1) * (h + 1));
 
     this.frameCount = 0;
     this.cfarAlarmCount = 0;
@@ -129,6 +141,11 @@ class RadarEngine {
     }
   }
 
+  setTargetByNorm(normX, normY) {
+    this.targetRangeBin = Math.max(3, Math.min(this.w - 4, Math.floor(normX * (this.w - 1))));
+    this.targetDopplerBin = Math.max(3, Math.min(this.h - 4, Math.floor(normY * (this.h - 1))));
+  }
+
   step() {
     if (this.sweepSpeed === 'pause') return;
     const speedMult = this.sweepSpeed === 'fast' ? 1.8 : 1.0;
@@ -140,11 +157,11 @@ class RadarEngine {
 
     // Physical clutter parameters based on WMO Sea State
     const seaParams = {
-      2: { power: 0.15, spread: 3.5, spikeRate: 0.006, spikeAmp: 0.32, freq: 1.0 },
-      3: { power: 0.32, spread: 7.5, spikeRate: 0.025, spikeAmp: 0.55, freq: 1.4 },
-      4: { power: 0.54, spread: 14.0, spikeRate: 0.080, spikeAmp: 0.82, freq: 1.9 },
-      5: { power: 0.82, spread: 23.0, spikeRate: 0.190, spikeAmp: 1.00, freq: 2.6 }
-    }[this.seaState] || { power: 0.32, spread: 7.5, spikeRate: 0.025, spikeAmp: 0.55, freq: 1.4 };
+      2: { power: 0.14, spread: 3.5, spikeRate: 0.005, spikeAmp: 0.30, freq: 1.0 },
+      3: { power: 0.30, spread: 7.5, spikeRate: 0.024, spikeAmp: 0.55, freq: 1.4 },
+      4: { power: 0.52, spread: 14.0, spikeRate: 0.075, spikeAmp: 0.82, freq: 1.9 },
+      5: { power: 0.82, spread: 23.0, spikeRate: 0.185, spikeAmp: 1.00, freq: 2.6 }
+    }[this.seaState] || { power: 0.30, spread: 7.5, spikeRate: 0.024, spikeAmp: 0.55, freq: 1.4 };
 
     const zeroD = Math.floor(H / 2);
     const dSigma = (seaParams.spread / 70.0) * H;
@@ -152,7 +169,7 @@ class RadarEngine {
     let cfarAlarms = 0;
     let netAlarms = 0;
 
-    // 1. Synthesize Raw Range-Doppler Map
+    // 1. Synthesize Raw Range-Doppler Map (Ocean Clutter + Buried Target)
     for (let y = 0; y < H; y++) {
       const dDist = y - zeroD;
       const dEnvelope = Math.exp(-(dDist * dDist) / (2 * dSigma * dSigma));
@@ -161,13 +178,13 @@ class RadarEngine {
         const idx = y * W + x;
         const thermal = 0.04 * (0.8 + 0.4 * Math.random());
 
-        // K-distribution: texture (gamma/wave surface) * speckle (exponential)
+        // Compound K-distribution (wave surface texture * exponential speckle)
         const wave = Math.sin(x * 0.16 + t * seaParams.freq) * Math.cos(y * 0.11 - t * 0.8 * seaParams.freq);
         const texture = Math.max(0, 0.4 + 0.6 * wave);
         const speckle = -Math.log(Math.max(1e-5, Math.random()));
         let clutter = seaParams.power * dEnvelope * texture * speckle * 0.42;
 
-        // Sea spike bursts (intermittent high amplitude whitecaps)
+        // Sea spike bursts (intermittent whitecap crests)
         if (Math.random() < seaParams.spikeRate) {
           clutter += (0.5 + 0.5 * Math.random()) * seaParams.spikeAmp;
         }
@@ -179,8 +196,8 @@ class RadarEngine {
         const dy = y - this.targetDopplerBin;
         const distSq = dx * dx + dy * dy;
 
-        if (distSq < 16) {
-          const targetLinear = Math.pow(10, (this.targetSCR - 10) / 20) * 0.78;
+        if (distSq < 20) {
+          const targetLinear = Math.pow(10, (this.targetSCR - 10) / 20) * 0.80;
           const psf = Math.exp(-distSq / 3.4);
           const flutter = 1.0 + 0.06 * Math.sin(t * 3.2);
           val += targetLinear * psf * flutter;
@@ -190,35 +207,62 @@ class RadarEngine {
       }
     }
 
-    // 2. Legacy CA-CFAR (Cell-Averaging 2D Sliding Window)
-    const G = 2; // Guard cells
-    const R = 4; // Reference cells
+    // 2. Build 2D Summed Area Table (Integral Image) in O(W*H)
+    const stride = W + 1;
+    this.sat.fill(0);
+    for (let y = 0; y < H; y++) {
+      let rowSum = 0;
+      const satRow = (y + 1) * stride;
+      const prevSatRow = y * stride;
+      const rawRow = y * W;
+      for (let x = 0; x < W; x++) {
+        rowSum += this.rawMap[rawRow + x];
+        this.sat[satRow + (x + 1)] = this.sat[prevSatRow + (x + 1)] + rowSum;
+      }
+    }
+
+    // 3. Fast O(1) CA-CFAR 2D Detector with Guard and Reference Windows
+    const G = 2; // Guard half-width (5x5 guard)
+    const R = 5; // Reference half-width (11x11 reference)
     const Pfa_nominal = 1e-3;
     const refCellsCount = (2 * R + 1) * (2 * R + 1) - (2 * G + 1) * (2 * G + 1);
     const alpha = refCellsCount * (Math.pow(Pfa_nominal, -1.0 / refCellsCount) - 1.0) * 1.35;
 
     for (let y = 0; y < H; y++) {
+      // Clamped Outer Reference Window coordinates
+      const ry1 = Math.max(0, y - R);
+      const ry2 = Math.min(H, y + R + 1);
+      const r_height = ry2 - ry1;
+
+      // Clamped Inner Guard Window coordinates
+      const gy1 = Math.max(0, y - G);
+      const gy2 = Math.min(H, y + G + 1);
+      const g_height = gy2 - gy1;
+
+      const ry1_stride = ry1 * stride;
+      const ry2_stride = ry2 * stride;
+      const gy1_stride = gy1 * stride;
+      const gy2_stride = gy2 * stride;
+
       for (let x = 0; x < W; x++) {
         const idx = y * W + x;
         const cut = this.rawMap[idx];
 
-        let sum = 0;
-        let count = 0;
+        const rx1 = Math.max(0, x - R);
+        const rx2 = Math.min(W, x + R + 1);
+        const refSum = this.sat[ry2_stride + rx2] - this.sat[ry1_stride + rx2] - this.sat[ry2_stride + rx1] + this.sat[ry1_stride + rx1];
+        const refCount = (rx2 - rx1) * r_height;
 
-        for (let dy = -R; dy <= R; dy++) {
-          const ny = y + dy;
-          if (ny < 0 || ny >= H) continue;
-          for (let dx = -R; dx <= R; dx++) {
-            const nx = x + dx;
-            if (nx < 0 || nx >= W) continue;
-            if (Math.abs(dx) <= G && Math.abs(dy) <= G) continue;
-            sum += this.rawMap[ny * W + nx];
-            count++;
-          }
-        }
+        const gx1 = Math.max(0, x - G);
+        const gx2 = Math.min(W, x + G + 1);
+        const guardSum = this.sat[gy2_stride + gx2] - this.sat[gy1_stride + gx2] - this.sat[gy2_stride + gx1] + this.sat[gy1_stride + gx1];
+        const guardCount = (gx2 - gx1) * g_height;
 
-        const avgNoise = count > 0 ? sum / count : 0.08;
-        const threshold = avgNoise * (1.0 + alpha * 0.22);
+        const trainingSum = refSum - guardSum;
+        const trainingCount = refCount - guardCount;
+
+        const avgNoise = trainingCount > 0 ? (trainingSum / trainingCount) : 0.08;
+        const threshold = avgNoise * (1.0 + alpha * 0.20);
         this.thresholdMap[idx] = threshold;
 
         if (cut > threshold) {
@@ -234,7 +278,7 @@ class RadarEngine {
       }
     }
 
-    // 3. ClutterNet Deep Neural Filter & Fallback Simulation
+    // 4. ClutterNet Deep Neural Filter & Fallback Simulation
     const isFallback = this.failSafeMode;
 
     for (let y = 0; y < H; y++) {
@@ -252,7 +296,7 @@ class RadarEngine {
           const suppressedClutter = Math.max(0, (raw - 0.07) * 0.035);
           const cleanNoise = 0.012 * Math.random();
 
-          if (distToTarget < 3.2) {
+          if (distToTarget < 3.4) {
             const shape = Math.exp(-(distToTarget * distToTarget) / 2.2);
             const amp = Math.max(0.60, 0.50 + (this.targetSCR / 15.0) * 0.48);
             this.clutterNetMap[idx] = Math.min(1.0, amp * shape + cleanNoise);
@@ -381,10 +425,10 @@ class TacticalAudio {
 
 // --- 4. DASHBOARD CONTROLLER & UI WIRING ---
 document.addEventListener('DOMContentLoaded', () => {
-  const engine = new RadarEngine(140, 105);
+  const engine = new RadarEngine(160, 120);
   const audio = new TacticalAudio();
 
-  // Canvases
+  // Primary Canvas Elements
   const canvasRaw = document.getElementById('canvasRaw');
   const canvasCfar = document.getElementById('canvasCfar');
   const canvasNet = document.getElementById('canvasNet');
@@ -395,10 +439,32 @@ document.addEventListener('DOMContentLoaded', () => {
   const ctxNet = canvasNet.getContext('2d');
   const ctx1D = canvas1D.getContext('2d');
 
-  // Offscreen ImageDatas for fast blitting
-  const imgDataRaw = ctxRaw.createImageData(engine.w, engine.h);
-  const imgDataCfar = ctxCfar.createImageData(engine.w, engine.h);
-  const imgDataNet = ctxNet.createImageData(engine.w, engine.h);
+  // Match canvas dimensions to 320x240 for crisp high-density display
+  canvasRaw.width = 320;
+  canvasRaw.height = 240;
+  canvasCfar.width = 320;
+  canvasCfar.height = 240;
+  canvasNet.width = 320;
+  canvasNet.height = 240;
+
+  // Offscreen Canvases for 100% full-viewport pixel blitting
+  const offRaw = document.createElement('canvas');
+  offRaw.width = engine.w;
+  offRaw.height = engine.h;
+  const offCtxRaw = offRaw.getContext('2d');
+  const imgDataRaw = offCtxRaw.createImageData(engine.w, engine.h);
+
+  const offCfar = document.createElement('canvas');
+  offCfar.width = engine.w;
+  offCfar.height = engine.h;
+  const offCtxCfar = offCfar.getContext('2d');
+  const imgDataCfar = offCtxCfar.createImageData(engine.w, engine.h);
+
+  const offNet = document.createElement('canvas');
+  offNet.width = engine.w;
+  offNet.height = engine.h;
+  const offCtxNet = offNet.getContext('2d');
+  const imgDataNet = offCtxNet.createImageData(engine.w, engine.h);
 
   // Crosshairs & Markers
   const crosshairs = {
@@ -411,6 +477,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   const netReticle = document.getElementById('netReticle');
+  const markerRaw = document.getElementById('markerRaw');
   const failSafeOverlay = document.getElementById('failSafeOverlay');
 
   // Readouts
@@ -538,6 +605,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Target Injection Preset
   targetPosSelect.addEventListener('change', (e) => {
     engine.setTargetPreset(e.target.value);
+    updateTacticalReticle();
+    audio.playTone(1100, 0.08, 0.05);
   });
 
   // Sweep Speed Select
@@ -571,12 +640,43 @@ document.addEventListener('DOMContentLoaded', () => {
     engine.sliceMode = 'doppler';
   });
 
-  // Interactive Crosshair Coordination Across 3 Heatmaps
+  // Interactive Target Repositioning via Click/Drag across ANY Heatmap
   const containers = [
     document.getElementById('cardRaw').querySelector('.canvas-container'),
     document.getElementById('cardCfar').querySelector('.canvas-container'),
     document.getElementById('cardNet').querySelector('.canvas-container')
   ];
+
+  let isDraggingTarget = false;
+
+  function setTargetFromPointer(e, container) {
+    const rect = container.getBoundingClientRect();
+    const normX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const normY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    engine.setTargetByNorm(normX, normY);
+    updateTacticalReticle();
+  }
+
+  containers.forEach(c => {
+    c.addEventListener('mousedown', (e) => {
+      isDraggingTarget = true;
+      setTargetFromPointer(e, c);
+      audio.playTone(1480, 0.09, 0.06);
+    });
+
+    c.addEventListener('mousemove', (e) => {
+      if (isDraggingTarget) {
+        setTargetFromPointer(e, c);
+      }
+      handleMouseMove(e, c);
+    });
+
+    c.addEventListener('mouseleave', handleMouseLeave);
+  });
+
+  window.addEventListener('mouseup', () => {
+    isDraggingTarget = false;
+  });
 
   function handleMouseMove(e, container) {
     const rect = container.getBoundingClientRect();
@@ -586,7 +686,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const normX = x / rect.width;
     const normY = y / rect.height;
 
-    // Position crosshairs on all 3 canvases
     const pctX = `${(normX * 100).toFixed(2)}%`;
     const pctY = `${(normY * 100).toFixed(2)}%`;
 
@@ -604,7 +703,6 @@ document.addEventListener('DOMContentLoaded', () => {
     crosshairs.hNet.style.display = 'block';
     crosshairs.vNet.style.display = 'block';
 
-    // Live Readout Bar
     const coords = engine.getCoordinates(normX, normY);
     readoutRange.textContent = `${coords.rangeKm} km`;
     readoutDoppler.textContent = `${coords.dopplerMs} m/s`;
@@ -621,11 +719,6 @@ document.addEventListener('DOMContentLoaded', () => {
     crosshairs.hNet.style.display = 'none';
     crosshairs.vNet.style.display = 'none';
   }
-
-  containers.forEach(c => {
-    c.addEventListener('mousemove', (e) => handleMouseMove(e, c));
-    c.addEventListener('mouseleave', handleMouseLeave);
-  });
 
   // Pipeline Stages Interactive Inspector (Block 4)
   const stageData = {
@@ -701,11 +794,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // --- 5. RENDER LOOP ---
-  function renderHeatmap(buffer, imgData, ctx, lut) {
+  // --- 5. ULTRA-FAST RENDER LOOP ---
+  function blitHeatmap(buffer, offCtx, offCanvas, imgData, mainCtx, lut) {
     const data = imgData.data;
     const len = buffer.length;
 
+    // Fill pixel colors from colormap LUT
     for (let i = 0; i < len; i++) {
       const val = Math.max(0, Math.min(1, buffer[i]));
       const lutIdx = Math.floor(val * 255) * 4;
@@ -716,36 +810,40 @@ document.addEventListener('DOMContentLoaded', () => {
       data[p + 3] = 255;
     }
 
-    ctx.putImageData(imgData, 0, 0);
+    offCtx.putImageData(imgData, 0, 0);
+
+    // Blit onto main high-resolution canvas with full 100% viewport coverage
+    const W = mainCtx.canvas.width;
+    const H = mainCtx.canvas.height;
+    mainCtx.imageSmoothingEnabled = false; // Preserve crisp tactical radar voxel styling
+    mainCtx.drawImage(offCanvas, 0, 0, W, H);
 
     // Draw Tactical Grid Overlay on Canvas
-    const w = ctx.canvas.width;
-    const h = ctx.canvas.height;
-    ctx.strokeStyle = 'rgba(0, 229, 255, 0.12)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
+    mainCtx.strokeStyle = 'rgba(0, 229, 255, 0.15)';
+    mainCtx.lineWidth = 1;
+    mainCtx.beginPath();
 
-    // 4 vertical range lines
+    // Vertical range markers
     for (let i = 1; i <= 3; i++) {
-      const x = (w / 4) * i;
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
+      const x = (W / 4) * i;
+      mainCtx.moveTo(x, 0);
+      mainCtx.lineTo(x, H);
     }
 
-    // 2 horizontal Doppler velocity lines
+    // Horizontal Doppler velocity markers
     for (let i = 1; i <= 2; i++) {
-      const y = (h / 3) * i;
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
+      const y = (H / 3) * i;
+      mainCtx.moveTo(0, y);
+      mainCtx.lineTo(W, y);
     }
-    ctx.stroke();
+    mainCtx.stroke();
 
     // Center Zero-Doppler Line
-    ctx.strokeStyle = 'rgba(0, 255, 136, 0.25)';
-    ctx.beginPath();
-    ctx.moveTo(0, h / 2);
-    ctx.lineTo(w, h / 2);
-    ctx.stroke();
+    mainCtx.strokeStyle = 'rgba(0, 255, 136, 0.35)';
+    mainCtx.beginPath();
+    mainCtx.moveTo(0, H / 2);
+    mainCtx.lineTo(W, H / 2);
+    mainCtx.stroke();
   }
 
   function render1DGraph() {
@@ -753,14 +851,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const H = canvas1D.height;
     ctx1D.clearRect(0, 0, W, H);
 
-    // Graph Background Grid
+    // Graph Background
     ctx1D.fillStyle = '#03070d';
     ctx1D.fillRect(0, 0, W, H);
 
-    ctx1D.strokeStyle = 'rgba(25, 45, 70, 0.6)';
+    // Grid Lines
+    ctx1D.strokeStyle = 'rgba(25, 45, 70, 0.65)';
     ctx1D.lineWidth = 1;
     ctx1D.beginPath();
-    for (let y = 30; y < H; y += 30) {
+    for (let y = 25; y < H; y += 25) {
       ctx1D.moveTo(0, y);
       ctx1D.lineTo(W, y);
     }
@@ -777,39 +876,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Trace 1: Raw Signal with Clutter
     ctx1D.strokeStyle = '#5a7596';
-    ctx1D.lineWidth = 1.2;
+    ctx1D.lineWidth = 1.3;
     ctx1D.beginPath();
     for (let i = 0; i < numPoints; i++) {
       const idx = isRange ? (sliceY * engine.w + i) : (i * engine.w + sliceX);
       const val = engine.rawMap[idx];
       const px = (i / (numPoints - 1)) * W;
-      const py = H - (val * (H - 20) + 10);
+      const py = H - (val * (H - 24) + 12);
       if (i === 0) ctx1D.moveTo(px, py); else ctx1D.lineTo(px, py);
     }
     ctx1D.stroke();
 
     // Trace 2: CFAR Adaptive Threshold
     ctx1D.strokeStyle = '#ffb700';
-    ctx1D.lineWidth = 1.8;
+    ctx1D.lineWidth = 2.0;
     ctx1D.beginPath();
     for (let i = 0; i < numPoints; i++) {
       const idx = isRange ? (sliceY * engine.w + i) : (i * engine.w + sliceX);
       const val = engine.thresholdMap[idx];
       const px = (i / (numPoints - 1)) * W;
-      const py = H - (val * (H - 20) + 10);
+      const py = H - (val * (H - 24) + 12);
       if (i === 0) ctx1D.moveTo(px, py); else ctx1D.lineTo(px, py);
     }
     ctx1D.stroke();
 
     // Trace 3: ClutterNet Neural Filter Clean Floor & Peak
     ctx1D.strokeStyle = '#00ff88';
-    ctx1D.lineWidth = 2.2;
+    ctx1D.lineWidth = 2.4;
     ctx1D.beginPath();
     for (let i = 0; i < numPoints; i++) {
       const idx = isRange ? (sliceY * engine.w + i) : (i * engine.w + sliceX);
       const val = engine.clutterNetMap[idx];
       const px = (i / (numPoints - 1)) * W;
-      const py = H - (val * (H - 20) + 10);
+      const py = H - (val * (H - 24) + 12);
       if (i === 0) ctx1D.moveTo(px, py); else ctx1D.lineTo(px, py);
     }
     ctx1D.stroke();
@@ -819,32 +918,48 @@ document.addEventListener('DOMContentLoaded', () => {
     const targetPx = (targetIdx / (numPoints - 1)) * W;
     const peakIdx = isRange ? (sliceY * engine.w + targetIdx) : (targetIdx * engine.w + sliceX);
     const peakVal = engine.clutterNetMap[peakIdx];
-    const targetPy = H - (peakVal * (H - 20) + 10);
+    const targetPy = H - (peakVal * (H - 24) + 12);
 
     ctx1D.fillStyle = '#ffffff';
     ctx1D.beginPath();
-    ctx1D.arc(targetPx, targetPy, 4.5, 0, Math.PI * 2);
+    ctx1D.arc(targetPx, targetPy, 5.0, 0, Math.PI * 2);
     ctx1D.fill();
     ctx1D.strokeStyle = '#00ff88';
-    ctx1D.lineWidth = 2;
+    ctx1D.lineWidth = 2.5;
     ctx1D.stroke();
 
-    // Axis label watermark on 1D graph
-    ctx1D.fillStyle = 'rgba(141, 164, 190, 0.7)';
+    // Cross-Section Axis Title
+    ctx1D.fillStyle = 'rgba(141, 164, 190, 0.85)';
     ctx1D.font = '10px "JetBrains Mono"';
-    ctx1D.fillText(isRange ? 'RANGE AXIS: 2.0 km ─────── Target @ 14.6 km ─────── 25.0 km' : 'DOPPLER AXIS: -35.0 m/s ─────── Target @ +11.5 m/s ─────── +35.0 m/s', 12, 18);
+    const rangeKmAtTarget = (engine.minRange + (engine.targetRangeBin / (engine.w - 1)) * (engine.maxRange - engine.minRange)).toFixed(1);
+    const dopplerMsAtTarget = (engine.minDoppler + (1.0 - (engine.targetDopplerBin / (engine.h - 1))) * (engine.maxDoppler - engine.minDoppler)).toFixed(1);
+
+    ctx1D.fillText(
+      isRange 
+        ? `RANGE SLICE: 2.0 km ─────── Target Echo @ ${rangeKmAtTarget} km (Doppler: ${dopplerMsAtTarget} m/s) ─────── 25.0 km` 
+        : `DOPPLER SLICE: -35.0 m/s ─────── Target Echo @ ${dopplerMsAtTarget} m/s (Range: ${rangeKmAtTarget} km) ─────── +35.0 m/s`, 
+      12, 18
+    );
   }
 
   function updateTacticalReticle() {
-    if (engine.failSafeMode) {
-      netReticle.style.display = 'none';
-      return;
-    }
-    netReticle.style.display = 'block';
     const pctX = (engine.targetRangeBin / (engine.w - 1)) * 100;
     const pctY = (engine.targetDopplerBin / (engine.h - 1)) * 100;
-    netReticle.style.left = `${pctX.toFixed(2)}%`;
-    netReticle.style.top = `${pctY.toFixed(2)}%`;
+
+    // Update ClutterNet Target Reticle
+    if (engine.failSafeMode) {
+      netReticle.style.display = 'none';
+    } else {
+      netReticle.style.display = 'block';
+      netReticle.style.left = `${pctX.toFixed(2)}%`;
+      netReticle.style.top = `${pctY.toFixed(2)}%`;
+    }
+
+    // Update Marker on Raw map
+    if (markerRaw) {
+      markerRaw.style.left = `${pctX.toFixed(2)}%`;
+      markerRaw.style.top = `${pctY.toFixed(2)}%`;
+    }
   }
 
   // Animation Loop (60 FPS)
@@ -853,10 +968,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const lut = COLORMAPS[engine.activeColormap] || COLORMAPS.phosphor;
 
-    // 1. Render 3 heatmaps
-    renderHeatmap(engine.rawMap, imgDataRaw, ctxRaw, lut);
-    renderHeatmap(engine.cfarMap, imgDataCfar, ctxCfar, lut);
-    renderHeatmap(engine.clutterNetMap, imgDataNet, ctxNet, lut);
+    // 1. Blit 3 heatmaps with 100% full canvas coverage
+    blitHeatmap(engine.rawMap, offCtxRaw, offRaw, imgDataRaw, ctxRaw, lut);
+    blitHeatmap(engine.cfarMap, offCtxCfar, offCfar, imgDataCfar, ctxCfar, lut);
+    blitHeatmap(engine.clutterNetMap, offCtxNet, offNet, imgDataNet, ctxNet, lut);
 
     // 2. Render 1D slice graph
     render1DGraph();
